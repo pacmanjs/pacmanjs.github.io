@@ -9,7 +9,7 @@ A lightweight, browser-based tribute to the legendary arcade game, Pac-Man, buil
   * High score tracking to chase your personal best 🏆
   * Power Pellets to turn the tables on the ghosts\! 💪
   * Responsive design for desktop and mobile 📱
-  * Retro pixel-art graphics and iconic sound effects 👾
+  * Retro pixel-art graphics 👾
 
 ## 🚀 Getting Started
 
@@ -29,7 +29,7 @@ That’s it\! No build tools or server required.
 
 ## 🌐 Play Online
 
-You can play the latest version live here: **[https://pacmanjs.github.io](pacmanjs.github.io)**
+You can play the latest version live here: **[pacmanjs.github.io](https://pacmanjs.github.io)**
 
 ## 🕹️ How to Play
 
