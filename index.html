@@ -152,11 +152,8 @@ Copyright (c) 2025 Valentyn Kolesnikov <0009-0003-9608-3364@orcid.org>
             box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5),
                         inset 0 0 50px rgba(0, 0, 255, 0.1);
             background: #0a0a0a;
-            image-rendering: optimizeSpeed;
-            image-rendering: -moz-crisp-edges;
-            image-rendering: -webkit-optimize-contrast;
-            image-rendering: optimize-contrast;
-            image-rendering: pixelated;
+            image-rendering: auto;
+            -ms-interpolation-mode: nearest-neighbor;
             touch-action: none;
             display: block;
         }
@@ -523,7 +520,9 @@ Copyright (c) 2025 Valentyn Kolesnikov <0009-0003-9608-3364@orcid.org>
             margin-bottom: 15px;
             background: linear-gradient(135deg, #ffd700, #ffed4e);
             -webkit-background-clip: text;
+            background-clip: text;
             -webkit-text-fill-color: transparent;
+            color: #ffd700;
             text-shadow: 0 0 30px rgba(255, 215, 0, 0.5);
         }
 
@@ -969,8 +968,45 @@ Copyright (c) 2025 Valentyn Kolesnikov <0009-0003-9608-3364@orcid.org>
     </div>
 
     <script>
+        // ========== Cross-browser compatibility polyfills ==========
+        (function() {
+            // requestAnimationFrame polyfill
+            var lastTime = 0;
+            var vendors = ['ms', 'moz', 'webkit', 'o'];
+            for (var x = 0; x < vendors.length && !window.requestAnimationFrame; ++x) {
+                window.requestAnimationFrame = window[vendors[x] + 'RequestAnimationFrame'];
+                window.cancelAnimationFrame = window[vendors[x] + 'CancelAnimationFrame']
+                    || window[vendors[x] + 'CancelRequestAnimationFrame'];
+            }
+            if (!window.requestAnimationFrame) {
+                window.requestAnimationFrame = function(callback) {
+                    var currTime = Date.now();
+                    var timeToCall = Math.max(0, 16 - (currTime - lastTime));
+                    var id = window.setTimeout(function() { callback(currTime + timeToCall); },
+                        timeToCall);
+                    lastTime = currTime + timeToCall;
+                    return id;
+                };
+            }
+            if (!window.cancelAnimationFrame) {
+                window.cancelAnimationFrame = function(id) {
+                    clearTimeout(id);
+                };
+            }
+            // performance.now polyfill
+            if (!window.performance) {
+                window.performance = {};
+            }
+            if (!window.performance.now) {
+                var navStart = Date.now();
+                window.performance.now = function() {
+                    return Date.now() - navStart;
+                };
+            }
+        })();
+
         const canvas = document.getElementById('gameCanvas');
-        const ctx = canvas.getContext('2d');
+        const ctx = canvas.getContext('2d', { alpha: false });
         
         const CELL_SIZE = 25;
         const ROWS = 20;
@@ -985,15 +1021,21 @@ Copyright (c) 2025 Valentyn Kolesnikov <0009-0003-9608-3364@orcid.org>
         let level = 1;
         let lives = 3;
         let currentLevelScore = 0;
-        let highScore = localStorage.getItem('pacmanHighScore') || 0;
+        let highScore = parseInt(localStorage.getItem('pacmanHighScore')) || 0;
         let completedLevels = JSON.parse(localStorage.getItem('pacmanCompletedLevels')) || [];
         let levelBestScores = JSON.parse(localStorage.getItem('pacmanLevelBestScores')) || {};
         let savedGameState = JSON.parse(localStorage.getItem('pacmanSavedGame')) || null;
+        // animationFrame is now a float advanced by deltaTime so visual effects are fps-independent
         let animationFrame = 0;
         let gameLoopId = null;
         let lastFrameTime = 0;
-        const targetFPS = 60;
-        const frameDelay = 1000 / targetFPS;
+
+        // Reference frame time used to convert per-frame speeds (originally tuned for ~60fps)
+        // into per-millisecond speeds. This is what makes the game framerate-independent
+        // and ensures correct speed on 60Hz, 120Hz, 144Hz, 240Hz displays etc.
+        const REFERENCE_FRAME_MS = 1000 / 60;
+        // Cap delta time to avoid huge jumps after tab switches / breakpoints
+        const MAX_DELTA_MS = 50; // ~3 frames at 60Hz
 
         const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
         const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
@@ -1011,6 +1053,8 @@ Copyright (c) 2025 Valentyn Kolesnikov <0009-0003-9608-3364@orcid.org>
 
         let currentSkin = skins[0];
 
+        // Speeds below remain "pixels per ~16.67ms" (60fps reference). The game loop converts them
+        // to pixels-per-actual-frame using deltaTime, so any refresh rate works correctly.
         const levels = [
             { ghostSpeed: isMobile ? 1.2 : 1.5, ghostCount: 2, powerUpDuration: 10000, playerSpeed: isMobile ? 2.0 : 2.5 },
             { ghostSpeed: isMobile ? 1.3 : 1.6, ghostCount: 3, powerUpDuration: 9000, playerSpeed: isMobile ? 2.0 : 2.5 },
@@ -1108,7 +1152,7 @@ Copyright (c) 2025 Valentyn Kolesnikov <0009-0003-9608-3364@orcid.org>
                     fullscreenPromise = elem.webkitEnterFullscreen();
                 }
                 
-                if (fullscreenPromise) {
+                if (fullscreenPromise && typeof fullscreenPromise.then === 'function') {
                     fullscreenPromise.then(() => {
                         document.body.classList.add('fullscreen-mode');
                         document.getElementById('fullscreenBtn').innerHTML = '◱';
@@ -1170,6 +1214,24 @@ Copyright (c) 2025 Valentyn Kolesnikov <0009-0003-9608-3364@orcid.org>
             lastTouchEnd = now;
         }, false);
 
+        // Pause when tab loses focus, to avoid huge deltaTime jumps
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                if (gameRunning && !gamePaused) {
+                    // soft-pause: just reset lastFrameTime when we come back
+                    if (gameLoopId) {
+                        cancelAnimationFrame(gameLoopId);
+                        gameLoopId = null;
+                    }
+                }
+            } else {
+                if (gameRunning && !gamePaused && !gameLoopId) {
+                    lastFrameTime = performance.now();
+                    gameLoopId = requestAnimationFrame(gameLoop);
+                }
+            }
+        });
+
         class Ghost {
             constructor(x, y, color, speed) {
                 this.x = x;
@@ -1178,14 +1240,14 @@ Copyright (c) 2025 Valentyn Kolesnikov <0009-0003-9608-3364@orcid.org>
                 this.pixelY = y * CELL_SIZE + CELL_SIZE / 2;
                 this.color = color;
                 this.originalColor = color;
-                this.speed = speed;
+                this.speed = speed; // base per-reference-frame speed
                 this.direction = 'up';
                 this.isVulnerable = false;
                 this.isEaten = false;
                 this.animationOffset = Math.random() * Math.PI * 2;
             }
 
-            move() {
+            move(frameMul) {
                 if (this.isEaten) {
                     const targetX = 12 * CELL_SIZE + CELL_SIZE / 2;
                     const targetY = 9 * CELL_SIZE + CELL_SIZE / 2;
@@ -1193,9 +1255,10 @@ Copyright (c) 2025 Valentyn Kolesnikov <0009-0003-9608-3364@orcid.org>
                     const dy = targetY - this.pixelY;
                     const distance = Math.sqrt(dx * dx + dy * dy);
                     
-                    if (distance > 2) {
-                        this.pixelX += (dx / distance) * this.speed * 2;
-                        this.pixelY += (dy / distance) * this.speed * 2;
+                    const moveStep = this.speed * 2 * frameMul;
+                    if (distance > moveStep) {
+                        this.pixelX += (dx / distance) * moveStep;
+                        this.pixelY += (dy / distance) * moveStep;
                     } else {
                         this.isEaten = false;
                         this.isVulnerable = false;
@@ -1212,7 +1275,9 @@ Copyright (c) 2025 Valentyn Kolesnikov <0009-0003-9608-3364@orcid.org>
                 const offsetX = this.pixelX % CELL_SIZE;
                 const offsetY = this.pixelY % CELL_SIZE;
 
-                if (Math.abs(offsetX - CELL_SIZE / 2) < 2 && Math.abs(offsetY - CELL_SIZE / 2) < 2) {
+                // Slightly larger tolerance helps higher-fps movements still snap to grid centers
+                const tol = Math.max(2, this.speed * frameMul + 0.5);
+                if (Math.abs(offsetX - CELL_SIZE / 2) < tol && Math.abs(offsetY - CELL_SIZE / 2) < tol) {
                     this.x = gridX;
                     this.y = gridY;
                     
@@ -1237,7 +1302,7 @@ Copyright (c) 2025 Valentyn Kolesnikov <0009-0003-9608-3364@orcid.org>
                     }
                 }
 
-                const moveSpeed = this.isVulnerable ? this.speed * 0.5 : this.speed;
+                const moveSpeed = (this.isVulnerable ? this.speed * 0.5 : this.speed) * frameMul;
                 switch(this.direction) {
                     case 'up':
                         this.pixelY -= moveSpeed;
@@ -1380,7 +1445,7 @@ Copyright (c) 2025 Valentyn Kolesnikov <0009-0003-9608-3364@orcid.org>
                     e.preventDefault();
                     const direction = btn.dataset.direction;
                     player.nextDirection = direction;
-                });
+                }, { passive: false });
                 
                 btn.addEventListener('click', (e) => {
                     e.preventDefault();
@@ -1427,8 +1492,9 @@ Copyright (c) 2025 Valentyn Kolesnikov <0009-0003-9608-3364@orcid.org>
                 playerY: player.y,
                 currentLevelScore: currentLevelScore
             };
-            localStorage.setItem('pacmanSavedGame', JSON.stringify(gameState));
-            // Keep in-memory copy in sync for UI/continue flows
+            try {
+                localStorage.setItem('pacmanSavedGame', JSON.stringify(gameState));
+            } catch (e) { /* storage may be full or disabled */ }
             savedGameState = gameState;
         }
 
@@ -1452,24 +1518,18 @@ Copyright (c) 2025 Valentyn Kolesnikov <0009-0003-9608-3364@orcid.org>
             return true;
         }
 
-        // FIX: Ensure Continue uses the saved level's configuration (not level 1)
         function continueGame() {
-            // Refresh savedGameState from storage to be safe
             savedGameState = JSON.parse(localStorage.getItem('pacmanSavedGame'));
             if (savedGameState) {
                 document.getElementById('startScreen').style.display = 'none';
 
-                // Load saved game first so 'level' is correct
                 loadSavedGame();
 
-                // Apply per-level runtime settings for the saved level
                 const levelConfig = levels[Math.min(level - 1, levels.length - 1)];
                 player.speed = levelConfig.playerSpeed;
 
-                // Recreate ghosts for the saved level (ghosts are not persisted)
                 initializeGhosts();
 
-                // Ensure helpers exist
                 if (!gameInitialized) {
                     createSkinSelector();
                     setupTouchControls();
@@ -1479,7 +1539,6 @@ Copyright (c) 2025 Valentyn Kolesnikov <0009-0003-9608-3364@orcid.org>
                 updateDisplay();
                 updateLives();
 
-                // Start without re-initializing/overwriting saved state
                 gameRunning = false;
                 gamePaused = false;
                 document.getElementById('pauseBtn').textContent = 'Pause';
@@ -1527,7 +1586,8 @@ Copyright (c) 2025 Valentyn Kolesnikov <0009-0003-9608-3364@orcid.org>
             document.getElementById('pauseBtn').textContent = 'Pause';
             document.getElementById('mobilePauseBtn').textContent = 'Pause';
             lastFrameTime = performance.now();
-            gameLoop(lastFrameTime);
+            if (gameLoopId) cancelAnimationFrame(gameLoopId);
+            gameLoopId = requestAnimationFrame(gameLoop);
         }
 
         function backToMenu() {
@@ -1543,16 +1603,9 @@ Copyright (c) 2025 Valentyn Kolesnikov <0009-0003-9608-3364@orcid.org>
             }
             
             savedGameState = JSON.parse(localStorage.getItem('pacmanSavedGame'));
-            if (savedGameState) {
-                const continueBtn = document.getElementById('continueBtn');
-                if (continueBtn) {
-                    continueBtn.style.display = 'inline-block';
-                }
-            } else {
-                const continueBtn = document.getElementById('continueBtn');
-                if (continueBtn) {
-                    continueBtn.style.display = 'none';
-                }
+            const continueBtn = document.getElementById('continueBtn');
+            if (continueBtn) {
+                continueBtn.style.display = savedGameState ? 'inline-block' : 'none';
             }
         }
 
@@ -1567,7 +1620,7 @@ Copyright (c) 2025 Valentyn Kolesnikov <0009-0003-9608-3364@orcid.org>
                 
                 const isCompleted = completedLevels.includes(i);
                 const isCurrent = i === level && savedGameState;
-                const isLocked = i > Math.max(...completedLevels, 0) + 1 && !isCompleted && !isCurrent;
+                const isLocked = i > Math.max.apply(null, completedLevels.length ? completedLevels : [0]) + 1 && !isCompleted && !isCurrent;
 
                 if (isCompleted) {
                     levelItem.classList.add('completed');
@@ -1658,7 +1711,9 @@ Copyright (c) 2025 Valentyn Kolesnikov <0009-0003-9608-3364@orcid.org>
             gamePaused = false;
             document.getElementById('pauseBtn').textContent = 'Pause';
             document.getElementById('mobilePauseBtn').textContent = 'Pause';
-            gameLoop(performance.now());
+            lastFrameTime = performance.now();
+            if (gameLoopId) cancelAnimationFrame(gameLoopId);
+            gameLoopId = requestAnimationFrame(gameLoop);
         }
 
         function closeLevelSelect() {
@@ -1799,24 +1854,28 @@ Copyright (c) 2025 Valentyn Kolesnikov <0009-0003-9608-3364@orcid.org>
                 case 'ArrowUp':
                 case 'w':
                 case 'W':
+                case 'Up': // older IE/Edge
                     player.nextDirection = 'up';
                     e.preventDefault();
                     break;
                 case 'ArrowDown':
                 case 's':
                 case 'S':
+                case 'Down':
                     player.nextDirection = 'down';
                     e.preventDefault();
                     break;
                 case 'ArrowLeft':
                 case 'a':
                 case 'A':
+                case 'Left':
                     player.nextDirection = 'left';
                     e.preventDefault();
                     break;
                 case 'ArrowRight':
                 case 'd':
                 case 'D':
+                case 'Right':
                     player.nextDirection = 'right';
                     e.preventDefault();
                     break;
@@ -1847,7 +1906,8 @@ Copyright (c) 2025 Valentyn Kolesnikov <0009-0003-9608-3364@orcid.org>
             document.getElementById('pauseBtn').textContent = 'Pause';
             document.getElementById('mobilePauseBtn').textContent = 'Pause';
             lastFrameTime = performance.now();
-            gameLoop(lastFrameTime);
+            if (gameLoopId) cancelAnimationFrame(gameLoopId);
+            gameLoopId = requestAnimationFrame(gameLoop);
         }
 
         function togglePause() {
@@ -1857,7 +1917,8 @@ Copyright (c) 2025 Valentyn Kolesnikov <0009-0003-9608-3364@orcid.org>
             document.getElementById('mobilePauseBtn').textContent = gamePaused ? 'Resume' : 'Pause';
             if (!gamePaused) {
                 lastFrameTime = performance.now();
-                gameLoop(lastFrameTime);
+                if (gameLoopId) cancelAnimationFrame(gameLoopId);
+                gameLoopId = requestAnimationFrame(gameLoop);
             } else {
                 saveGame();
             }
@@ -1883,7 +1944,7 @@ Copyright (c) 2025 Valentyn Kolesnikov <0009-0003-9608-3364@orcid.org>
                 powerUpTimer = null;
             }
             
-            localStorage.removeItem('pacmanSavedGame');
+            try { localStorage.removeItem('pacmanSavedGame'); } catch (e) {}
             savedGameState = null;
             
             document.getElementById('gameOverModal').style.display = 'none';
@@ -1910,12 +1971,12 @@ Copyright (c) 2025 Valentyn Kolesnikov <0009-0003-9608-3364@orcid.org>
             const completedLevel = level - 1;
             if (!levelBestScores[completedLevel] || score > levelBestScores[completedLevel]) {
                 levelBestScores[completedLevel] = score;
-                localStorage.setItem('pacmanLevelBestScores', JSON.stringify(levelBestScores));
+                try { localStorage.setItem('pacmanLevelBestScores', JSON.stringify(levelBestScores)); } catch (e) {}
             }
             
             if (!completedLevels.includes(completedLevel)) {
                 completedLevels.push(completedLevel);
-                localStorage.setItem('pacmanCompletedLevels', JSON.stringify(completedLevels));
+                try { localStorage.setItem('pacmanCompletedLevels', JSON.stringify(completedLevels)); } catch (e) {}
             }
             
             if (level > 10) {
@@ -1950,7 +2011,8 @@ Copyright (c) 2025 Valentyn Kolesnikov <0009-0003-9608-3364@orcid.org>
             saveGame();
             gameRunning = true;
             lastFrameTime = performance.now();
-            gameLoop(lastFrameTime);
+            if (gameLoopId) cancelAnimationFrame(gameLoopId);
+            gameLoopId = requestAnimationFrame(gameLoop);
         }
 
         function gameOver(completed = false) {
@@ -1964,12 +2026,12 @@ Copyright (c) 2025 Valentyn Kolesnikov <0009-0003-9608-3364@orcid.org>
                 gameLoopId = null;
             }
             
-            localStorage.removeItem('pacmanSavedGame');
+            try { localStorage.removeItem('pacmanSavedGame'); } catch (e) {}
             savedGameState = null;
             
             if (score > highScore) {
                 highScore = score;
-                localStorage.setItem('pacmanHighScore', highScore);
+                try { localStorage.setItem('pacmanHighScore', highScore); } catch (e) {}
                 document.getElementById('highScore').textContent = highScore;
             }
             
@@ -1993,13 +2055,16 @@ Copyright (c) 2025 Valentyn Kolesnikov <0009-0003-9608-3364@orcid.org>
             }
         }
 
-        function movePlayer() {
+        function movePlayer(frameMul) {
             const gridX = Math.floor(player.pixelX / CELL_SIZE);
             const gridY = Math.floor(player.pixelY / CELL_SIZE);
             const offsetX = player.pixelX % CELL_SIZE;
             const offsetY = player.pixelY % CELL_SIZE;
 
-            if (Math.abs(offsetX - CELL_SIZE / 2) < 3 && Math.abs(offsetY - CELL_SIZE / 2) < 3) {
+            // Slightly larger tolerance with higher frame multipliers ensures we catch the
+            // grid-center event even at fast frame intervals on 120Hz+ displays.
+            const tol = Math.max(3, player.speed * frameMul + 0.5);
+            if (Math.abs(offsetX - CELL_SIZE / 2) < tol && Math.abs(offsetY - CELL_SIZE / 2) < tol) {
                 player.x = gridX;
                 player.y = gridY;
                 
@@ -2038,23 +2103,25 @@ Copyright (c) 2025 Valentyn Kolesnikov <0009-0003-9608-3364@orcid.org>
             if (player.direction) {
                 const nextPos = getNextPosition(player.x, player.y, player.direction);
                 if (canMoveTo(nextPos.x, nextPos.y)) {
+                    const moveStep = player.speed * frameMul;
                     switch(player.direction) {
                         case 'up':
-                            player.pixelY -= player.speed;
+                            player.pixelY -= moveStep;
                             break;
                         case 'down':
-                            player.pixelY += player.speed;
+                            player.pixelY += moveStep;
                             break;
                         case 'left':
-                            player.pixelX -= player.speed;
+                            player.pixelX -= moveStep;
                             if (player.pixelX < 0) player.pixelX = canvas.width;
                             break;
                         case 'right':
-                            player.pixelX += player.speed;
+                            player.pixelX += moveStep;
                             if (player.pixelX > canvas.width) player.pixelX = 0;
                             break;
                     }
-                    player.mouthAnimation += 0.15;
+                    // Mouth animation also scaled to time-based motion
+                    player.mouthAnimation += 0.15 * frameMul;
                 }
             }
         }
@@ -2255,26 +2322,36 @@ Copyright (c) 2025 Valentyn Kolesnikov <0009-0003-9608-3364@orcid.org>
             ctx.restore();
         }
 
+        // ========== Main game loop (frame-rate independent) ==========
+        // Works correctly on any refresh rate (60Hz, 75Hz, 90Hz, 120Hz, 144Hz, 240Hz...)
+        // because all motion is multiplied by `frameMul` = deltaTime / REFERENCE_FRAME_MS.
         function gameLoop(currentTime) {
             if (!gameRunning || gamePaused) {
                 gameLoopId = null;
                 return;
             }
             
-            const deltaTime = currentTime - lastFrameTime;
+            // currentTime may be missing on some old polyfills
+            if (typeof currentTime !== 'number') currentTime = performance.now();
+
+            let deltaTime = currentTime - lastFrameTime;
+            // Clamp big jumps (tab-switch, lag spike) so the player/ghosts don't teleport
+            if (deltaTime > MAX_DELTA_MS) deltaTime = MAX_DELTA_MS;
+            if (deltaTime < 0) deltaTime = 0;
             
-            if (deltaTime >= frameDelay) {
-                animationFrame++;
-                
-                movePlayer();
-                ghosts.forEach(ghost => ghost.move());
-                checkCollisions();
-                
-                draw();
-                
-                lastFrameTime = currentTime - (deltaTime % frameDelay);
-            }
+            const frameMul = deltaTime / REFERENCE_FRAME_MS;
             
+            // animationFrame keeps the same visual speed regardless of fps
+            animationFrame += frameMul;
+            
+            // Update game state with delta-time scaled motion
+            movePlayer(frameMul);
+            ghosts.forEach(ghost => ghost.move(frameMul));
+            checkCollisions();
+            
+            draw();
+            
+            lastFrameTime = currentTime;
             gameLoopId = requestAnimationFrame(gameLoop);
         }
 
